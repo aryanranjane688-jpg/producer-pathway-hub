@@ -7,18 +7,12 @@ import { Progress } from "@/components/ui/progress";
 import { ArrowLeft, ArrowRight, Upload, CheckCircle, FileText } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useToast } from "@/hooks/use-toast";
-
-interface FormData {
-  fullName: string;
-  email: string;
-  cooperativeName: string;
-  aadhaarFile: File | null;
-  landRecordFile: File | null;
-}
+import { applicationService, fileUploadService } from "@/lib/firebaseService";
+import { ApplicationFormData } from "@/types/application";
 
 const ApplicationForm = () => {
   const [currentStep, setCurrentStep] = useState(1);
-  const [formData, setFormData] = useState<FormData>({
+  const [formData, setFormData] = useState<ApplicationFormData>({
     fullName: "",
     email: "",
     cooperativeName: "",
@@ -26,10 +20,11 @@ const ApplicationForm = () => {
     landRecordFile: null,
   });
   const [uploadingFile, setUploadingFile] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
   const navigate = useNavigate();
   const { toast } = useToast();
 
-  const handleInputChange = (field: keyof FormData, value: string) => {
+  const handleInputChange = (field: keyof ApplicationFormData, value: string) => {
     setFormData(prev => ({ ...prev, [field]: value }));
   };
 
@@ -43,37 +38,95 @@ const ApplicationForm = () => {
       return;
     }
 
+    if (file.size > 5 * 1024 * 1024) { // 5MB limit
+      toast({
+        title: "File too large",
+        description: "Please upload files smaller than 5MB.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     setUploadingFile(field);
     
-    // Simulate upload process
-    await new Promise(resolve => setTimeout(resolve, 2000));
-    
-    setFormData(prev => ({ ...prev, [field]: file }));
-    setUploadingFile(null);
-    
-    toast({
-      title: "File uploaded successfully",
-      description: `${field === 'aadhaarFile' ? 'Aadhaar card' : 'Land record document'} uploaded.`,
-    });
+    try {
+      // For now, we'll just store the file reference
+      // Actual upload will happen during form submission
+      setFormData(prev => ({ ...prev, [field]: file }));
+      
+      toast({
+        title: "File selected successfully",
+        description: `${field === 'aadhaarFile' ? 'Aadhaar card' : 'Land record document'} ready for upload.`,
+      });
+    } catch (error) {
+      console.error('Error handling file:', error);
+      toast({
+        title: "Error with file",
+        description: "There was an error processing the file. Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setUploadingFile(null);
+    }
   };
 
   const handleSubmit = async () => {
-    // Simulate form submission
-    await new Promise(resolve => setTimeout(resolve, 1500));
+    if (!formData.aadhaarFile || !formData.landRecordFile) {
+      toast({
+        title: "Missing files",
+        description: "Please upload both required documents.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setSubmitting(true);
     
-    // Create mock applicant
-    const applicant = {
-      id: Date.now().toString(),
-      ...formData,
-      status: 'PENDING',
-      submissionDate: new Date().toISOString(),
-    };
-    
-    // Store in localStorage (mock database)
-    const existingApplicants = JSON.parse(localStorage.getItem('applicants') || '[]');
-    localStorage.setItem('applicants', JSON.stringify([...existingApplicants, applicant]));
-    
-    navigate('/application-success');
+    try {
+      // First, create the application in Firestore
+      const applicationData = {
+        fullName: formData.fullName,
+        email: formData.email,
+        cooperativeName: formData.cooperativeName,
+        status: 'PENDING' as const,
+        submissionDate: new Date().toISOString(),
+      };
+
+      const applicationId = await applicationService.createApplication(applicationData);
+
+      // Upload files to Firebase Storage
+      const uploads = await fileUploadService.uploadApplicationDocuments(
+        formData.aadhaarFile,
+        formData.landRecordFile,
+        applicationId
+      );
+
+      // Update the application with file URLs
+      await applicationService.updateApplicationFiles(
+        applicationId,
+        uploads.aadhaarFile.url,
+        uploads.aadhaarFile.fileName,
+        uploads.landRecordFile.url,
+        uploads.landRecordFile.fileName
+      );
+      
+      toast({
+        title: "Application submitted successfully!",
+        description: "Your application has been received and is under review.",
+      });
+      
+      navigate('/application-success');
+      
+    } catch (error) {
+      console.error('Error submitting application:', error);
+      toast({
+        title: "Submission failed",
+        description: "There was an error submitting your application. Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const nextStep = () => {
@@ -277,12 +330,22 @@ const ApplicationForm = () => {
                 disabled={
                   (currentStep === 1 && !isStep1Valid) ||
                   (currentStep === 2 && !isStep2Valid) ||
-                  uploadingFile !== null
+                  uploadingFile !== null ||
+                  submitting
                 }
                 className="flex items-center gap-2 gradient-primary text-primary-foreground"
               >
-                {currentStep === 2 ? 'Submit Application' : 'Next'}
-                {currentStep === 1 && <ArrowRight className="w-4 h-4" />}
+                {submitting ? (
+                  <>
+                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-primary-foreground"></div>
+                    Submitting...
+                  </>
+                ) : (
+                  <>
+                    {currentStep === 2 ? 'Submit Application' : 'Next'}
+                    {currentStep === 1 && <ArrowRight className="w-4 h-4" />}
+                  </>
+                )}
               </Button>
             </div>
           </CardContent>

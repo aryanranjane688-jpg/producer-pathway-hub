@@ -10,24 +10,16 @@ import {
   TableHeader, 
   TableRow 
 } from "@/components/ui/table";
-import { LogOut, Users, Clock, CheckCircle, Eye } from "lucide-react";
+import { LogOut, Users, Clock, CheckCircle, Eye, RefreshCw } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useToast } from "@/hooks/use-toast";
-
-interface Applicant {
-  id: string;
-  fullName: string;
-  email: string;
-  cooperativeName: string;
-  status: 'PENDING' | 'APPROVED';
-  submissionDate: string;
-  aadhaarFile: File | null;
-  landRecordFile: File | null;
-}
+import { applicationService } from "@/lib/firebaseService";
+import { Application } from "@/types/application";
 
 const AdminDashboard = () => {
-  const [applicants, setApplicants] = useState<Applicant[]>([]);
+  const [applicants, setApplicants] = useState<Application[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const navigate = useNavigate();
   const { toast } = useToast();
 
@@ -43,15 +35,38 @@ const AdminDashboard = () => {
     loadApplicants();
   }, [navigate]);
 
-  const loadApplicants = async () => {
-    setLoading(true);
+  const loadApplicants = async (isRefresh = false) => {
+    if (isRefresh) {
+      setRefreshing(true);
+    } else {
+      setLoading(true);
+    }
     
-    // Simulate API call
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    
-    const storedApplicants = JSON.parse(localStorage.getItem('applicants') || '[]');
-    setApplicants(storedApplicants);
-    setLoading(false);
+    try {
+      const applications = await applicationService.getAllApplications();
+      setApplicants(applications);
+      
+      if (isRefresh) {
+        toast({
+          title: "Applications refreshed",
+          description: "Latest applications have been loaded.",
+        });
+      }
+    } catch (error) {
+      console.error('Error loading applications:', error);
+      toast({
+        title: "Error loading applications",
+        description: "Failed to load applications. Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
+
+  const handleRefresh = () => {
+    loadApplicants(true);
   };
 
   const handleLogout = () => {
@@ -73,6 +88,7 @@ const AdminDashboard = () => {
 
   const pendingCount = applicants.filter(app => app.status === 'PENDING').length;
   const approvedCount = applicants.filter(app => app.status === 'APPROVED').length;
+  const rejectedCount = applicants.filter(app => app.status === 'REJECTED').length;
 
   if (loading) {
     return (
@@ -94,14 +110,25 @@ const AdminDashboard = () => {
             <h1 className="text-3xl font-bold text-foreground">Admin Dashboard</h1>
             <p className="text-muted-foreground">Manage producer applications</p>
           </div>
-          <Button 
-            variant="outline" 
-            onClick={handleLogout}
-            className="flex items-center gap-2"
-          >
-            <LogOut className="w-4 h-4" />
-            Logout
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button 
+              variant="outline" 
+              onClick={handleRefresh}
+              disabled={refreshing}
+              className="flex items-center gap-2"
+            >
+              <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
+              Refresh
+            </Button>
+            <Button 
+              variant="outline" 
+              onClick={handleLogout}
+              className="flex items-center gap-2"
+            >
+              <LogOut className="w-4 h-4" />
+              Logout
+            </Button>
+          </div>
         </div>
 
         {/* Stats Cards */}
@@ -198,9 +225,12 @@ const AdminDashboard = () => {
                         <TableCell>
                           <Badge 
                             variant={applicant.status === 'APPROVED' ? 'default' : 'secondary'}
-                            className={applicant.status === 'APPROVED' 
-                              ? 'bg-success text-success-foreground' 
-                              : 'bg-warning/20 text-warning'
+                            className={
+                              applicant.status === 'APPROVED' 
+                                ? 'bg-success text-success-foreground' 
+                                : applicant.status === 'REJECTED'
+                                ? 'bg-destructive text-destructive-foreground'
+                                : 'bg-warning/20 text-warning'
                             }
                           >
                             {applicant.status}

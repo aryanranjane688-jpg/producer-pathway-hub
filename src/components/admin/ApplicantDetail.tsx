@@ -17,21 +17,13 @@ import {
   Mail, 
   Building2,
   Calendar,
-  ExternalLink
+  ExternalLink,
+  X
 } from "lucide-react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useToast } from "@/hooks/use-toast";
-
-interface Applicant {
-  id: string;
-  fullName: string;
-  email: string;
-  cooperativeName: string;
-  status: 'PENDING' | 'APPROVED';
-  submissionDate: string;
-  aadhaarFile: File | null;
-  landRecordFile: File | null;
-}
+import { applicationService } from "@/lib/firebaseService";
+import { Application } from "@/types/application";
 
 interface Credentials {
   username: string;
@@ -40,10 +32,13 @@ interface Credentials {
 
 const ApplicantDetail = () => {
   const { id } = useParams<{ id: string }>();
-  const [applicant, setApplicant] = useState<Applicant | null>(null);
+  const [applicant, setApplicant] = useState<Application | null>(null);
   const [loading, setLoading] = useState(true);
   const [showConfirmDialog, setShowConfirmDialog] = useState(false);
+  const [showRejectDialog, setShowRejectDialog] = useState(false);
   const [approving, setApproving] = useState(false);
+  const [rejecting, setRejecting] = useState(false);
+  const [rejectReason, setRejectReason] = useState('');
   const [credentials, setCredentials] = useState<Credentials | null>(null);
   const navigate = useNavigate();
   const { toast } = useToast();
@@ -60,26 +55,35 @@ const ApplicantDetail = () => {
   }, [id, navigate]);
 
   const loadApplicant = async () => {
+    if (!id) return;
+    
     setLoading(true);
     
-    // Simulate API call
-    await new Promise(resolve => setTimeout(resolve, 800));
-    
-    const applicants = JSON.parse(localStorage.getItem('applicants') || '[]');
-    const foundApplicant = applicants.find((app: Applicant) => app.id === id);
-    
-    if (!foundApplicant) {
+    try {
+      const foundApplicant = await applicationService.getApplicationById(id);
+      
+      if (!foundApplicant) {
+        toast({
+          title: "Applicant not found",
+          description: "The requested applicant could not be found.",
+          variant: "destructive",
+        });
+        navigate('/admin/dashboard');
+        return;
+      }
+      
+      setApplicant(foundApplicant);
+    } catch (error) {
+      console.error('Error loading applicant:', error);
       toast({
-        title: "Applicant not found",
-        description: "The requested applicant could not be found.",
+        title: "Error loading applicant",
+        description: "Failed to load applicant details. Please try again.",
         variant: "destructive",
       });
       navigate('/admin/dashboard');
-      return;
+    } finally {
+      setLoading(false);
     }
-    
-    setApplicant(foundApplicant);
-    setLoading(false);
   };
 
   const generateCredentials = (): Credentials => {
@@ -93,33 +97,72 @@ const ApplicantDetail = () => {
     
     setApproving(true);
     
-    // Simulate approval process
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    try {
+      // Update application status in Firebase
+      await applicationService.updateApplicationStatus(
+        applicant.id, 
+        'APPROVED', 
+        'Admin User', // In real app, this would be the actual admin user
+        'Application approved and credentials generated'
+      );
+      
+      // Generate credentials
+      const newCredentials = generateCredentials();
+      setCredentials(newCredentials);
+      
+      // Update local state
+      setApplicant({ ...applicant, status: 'APPROVED' });
+      setShowConfirmDialog(false);
+      
+      toast({
+        title: "Producer approved successfully",
+        description: "Credentials have been generated and stored.",
+      });
+    } catch (error) {
+      console.error('Error approving application:', error);
+      toast({
+        title: "Error approving application",
+        description: "Failed to approve application. Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setApproving(false);
+    }
+  };
+
+  const handleReject = async () => {
+    if (!applicant || !rejectReason.trim()) return;
     
-    // Generate credentials
-    const newCredentials = generateCredentials();
-    setCredentials(newCredentials);
+    setRejecting(true);
     
-    // Update applicant status
-    const applicants = JSON.parse(localStorage.getItem('applicants') || '[]');
-    const updatedApplicants = applicants.map((app: Applicant) =>
-      app.id === applicant.id ? { ...app, status: 'APPROVED' } : app
-    );
-    localStorage.setItem('applicants', JSON.stringify(updatedApplicants));
-    
-    // Store credentials (in real app, this would be sent via email)
-    const existingCredentials = JSON.parse(localStorage.getItem('credentials') || '{}');
-    existingCredentials[applicant.id] = newCredentials;
-    localStorage.setItem('credentials', JSON.stringify(existingCredentials));
-    
-    setApplicant({ ...applicant, status: 'APPROVED' });
-    setShowConfirmDialog(false);
-    setApproving(false);
-    
-    toast({
-      title: "Producer approved successfully",
-      description: "Credentials have been generated and stored.",
-    });
+    try {
+      // Update application status in Firebase
+      await applicationService.updateApplicationStatus(
+        applicant.id, 
+        'REJECTED', 
+        'Admin User', // In real app, this would be the actual admin user
+        rejectReason.trim()
+      );
+      
+      // Update local state
+      setApplicant({ ...applicant, status: 'REJECTED' });
+      setShowRejectDialog(false);
+      setRejectReason('');
+      
+      toast({
+        title: "Application rejected",
+        description: "The application has been rejected with the provided reason.",
+      });
+    } catch (error) {
+      console.error('Error rejecting application:', error);
+      toast({
+        title: "Error rejecting application",
+        description: "Failed to reject application. Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setRejecting(false);
+    }
   };
 
   const formatDate = (dateString: string) => {
@@ -133,11 +176,19 @@ const ApplicantDetail = () => {
   };
 
   const openDocument = (fileType: 'aadhaar' | 'landRecord') => {
-    // In a real app, this would open the actual document
-    toast({
-      title: "Document preview",
-      description: `${fileType === 'aadhaar' ? 'Aadhaar card' : 'Land record document'} would open in a new tab.`,
-    });
+    if (!applicant) return;
+    
+    const fileUrl = fileType === 'aadhaar' ? applicant.aadhaarFileUrl : applicant.landRecordFileUrl;
+    
+    if (fileUrl) {
+      window.open(fileUrl, '_blank');
+    } else {
+      toast({
+        title: "Document not available",
+        description: `${fileType === 'aadhaar' ? 'Aadhaar card' : 'Land record document'} is not available.`,
+        variant: "destructive",
+      });
+    }
   };
 
   if (loading) {
@@ -180,6 +231,8 @@ const ApplicantDetail = () => {
             className={`text-base px-4 py-2 ${
               applicant.status === 'APPROVED' 
                 ? 'bg-success text-success-foreground' 
+                : applicant.status === 'REJECTED'
+                ? 'bg-destructive text-destructive-foreground'
                 : 'bg-warning/20 text-warning'
             }`}
           >
@@ -245,7 +298,7 @@ const ApplicantDetail = () => {
                       <CheckCircle className="w-5 h-5 text-success" />
                     </div>
                     <p className="text-sm text-muted-foreground mb-3">
-                      {applicant.aadhaarFile?.name || 'aadhaar_document.pdf'}
+                      {applicant.aadhaarFileName || 'aadhaar_document.pdf'}
                     </p>
                     <Button 
                       variant="outline" 
@@ -264,7 +317,7 @@ const ApplicantDetail = () => {
                       <CheckCircle className="w-5 h-5 text-success" />
                     </div>
                     <p className="text-sm text-muted-foreground mb-3">
-                      {applicant.landRecordFile?.name || 'land_record_document.pdf'}
+                      {applicant.landRecordFileName || 'land_record_document.pdf'}
                     </p>
                     <Button 
                       variant="outline" 
@@ -289,21 +342,45 @@ const ApplicantDetail = () => {
               </CardHeader>
               <CardContent className="space-y-4">
                 {applicant.status === 'PENDING' ? (
-                  <Button 
-                    onClick={() => setShowConfirmDialog(true)}
-                    className="w-full gradient-primary text-primary-foreground"
-                    size="lg"
-                  >
-                    <CheckCircle className="w-4 h-4 mr-2" />
-                    Approve and Generate Credentials
-                  </Button>
-                ) : (
+                  <div className="space-y-3">
+                    <Button 
+                      onClick={() => setShowConfirmDialog(true)}
+                      className="w-full gradient-primary text-primary-foreground"
+                      size="lg"
+                    >
+                      <CheckCircle className="w-4 h-4 mr-2" />
+                      Approve and Generate Credentials
+                    </Button>
+                    <Button 
+                      onClick={() => setShowRejectDialog(true)}
+                      variant="destructive"
+                      className="w-full"
+                      size="lg"
+                    >
+                      <X className="w-4 h-4 mr-2" />
+                      Reject Application
+                    </Button>
+                  </div>
+                ) : applicant.status === 'APPROVED' ? (
                   <div className="text-center p-4 bg-success-light rounded-lg">
                     <CheckCircle className="w-8 h-8 text-success mx-auto mb-2" />
                     <p className="font-semibold text-foreground">Already Approved</p>
                     <p className="text-sm text-muted-foreground">
                       This producer has been approved and credentials have been generated.
                     </p>
+                  </div>
+                ) : (
+                  <div className="text-center p-4 bg-destructive/10 rounded-lg">
+                    <X className="w-8 h-8 text-destructive mx-auto mb-2" />
+                    <p className="font-semibold text-foreground">Application Rejected</p>
+                    <p className="text-sm text-muted-foreground">
+                      This application has been rejected.
+                    </p>
+                    {applicant.notes && (
+                      <p className="text-sm text-muted-foreground mt-2 italic">
+                        Reason: {applicant.notes}
+                      </p>
+                    )}
                   </div>
                 )}
 
@@ -366,6 +443,50 @@ const ApplicantDetail = () => {
               className="gradient-primary text-primary-foreground"
             >
               {approving ? "Approving..." : "Yes, Approve"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Reject Dialog */}
+      <Dialog open={showRejectDialog} onOpenChange={setShowRejectDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Reject Producer Application?</DialogTitle>
+          </DialogHeader>
+          <div className="py-4 space-y-4">
+            <p className="text-muted-foreground">
+              Are you sure you want to reject <strong>{applicant.fullName}</strong>'s application? 
+              Please provide a reason for rejection.
+            </p>
+            <div>
+              <label className="text-sm font-medium text-muted-foreground">Rejection Reason</label>
+              <textarea
+                value={rejectReason}
+                onChange={(e) => setRejectReason(e.target.value)}
+                placeholder="Enter reason for rejection..."
+                className="w-full mt-2 p-3 border border-border rounded-lg resize-none"
+                rows={3}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button 
+              variant="outline" 
+              onClick={() => {
+                setShowRejectDialog(false);
+                setRejectReason('');
+              }}
+              disabled={rejecting}
+            >
+              Cancel
+            </Button>
+            <Button 
+              onClick={handleReject}
+              disabled={rejecting || !rejectReason.trim()}
+              variant="destructive"
+            >
+              {rejecting ? "Rejecting..." : "Reject Application"}
             </Button>
           </DialogFooter>
         </DialogContent>
